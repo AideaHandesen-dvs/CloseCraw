@@ -1,0 +1,63 @@
+[
+  {
+    "hostname": "router1",
+    "hardware": "Example Router",
+    "ip": "192.168.1.1",
+    "os": "OpenWrt 24.10.1",
+    "arch": "aarch64",
+    "kernel": "6.1.99",
+    "cpu": "Cortex-A55 x4",
+    "cores": "4",
+    "memory_mb": 4096,
+    "disks": "/dev/mmcblk0 27G",
+    "gpu": "none",
+    "role": "Gateway / Firewall",
+    "services": [
+      {
+        "name": "uhttpd",
+        "port": 80,
+        "protocol": "http",
+        "public": false,
+        "description": "管理画面"
+      }
+    ]
+  },
+  {
+    "hostname": "server1",
+    "hardware": "Example Server",
+    "ip": "192.168.1.10",
+    "os": "Debian GNU/Linux 12",
+    "arch": "x86_64",
+    "kernel": "6.1.0",
+    "cpu": "Intel Core i5",
+    "cores": "8",
+    "memory_mb": 16384,
+    "disks": "/dev/sda 512G",
+    "gpu": "none",
+    "role": "General server",
+    "services": [
+      {
+        "name": "nginx",
+        "port": 443,
+        "protocol": "https",
+        "public": true,
+        "description": "Webサーバー"
+      }
+    ]
+  },
+  {
+    "hostname": "windows-pc",
+    "hardware": "Example Desktop",
+    "ip": "192.168.1.20",
+    "os": "Windows 10",
+    "arch": "x86_64",
+    "kernel": "10.0.19041",
+    "cpu": "Intel Core i7",
+    "cores": "16",
+    "memory_mb": 32768,
+    "disks": "C: 512G",
+    "gpu": "NVIDIA RTX 3080",
+    "role": "Desktop / Workstation",
+    "services": []
+  }
+]
