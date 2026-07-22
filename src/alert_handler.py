@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
-Phase 3: Alert Handler (キューイング＆フォールバック対応版)
+Alert Handler (キューイング＆フォールバック対応版)
 Alertmanager Webhook → キューに追加 → 5分ごとにまとめて診断・通知
+
+スクリプト選択は LLM ではなく対応表 (ALERT_TO_SCRIPT) の表引き。
+LLM が担うのは「診断結果の要約」だけ。詳細は docs/DESIGN.md を参照。
 """
 import json
 import re
@@ -35,8 +38,16 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 PROCESS_INTERVAL = 300  # 5分ごとにキュー処理
 
+# Gemini 無料枠(RPM)対策。アラートストーム時の連投を抑える。
+# 呼び出し間隔の下限(秒)。
+GEMINI_MIN_INTERVAL = float(os.getenv("GEMINI_MIN_INTERVAL", "7"))
+# 1回の掃き出しで処理する最大アラート数。超過分は次サイクルへ繰り越す(捨てない)
+MAX_ALERTS_PER_FLUSH = int(os.getenv("MAX_ALERTS_PER_FLUSH", "20"))
+
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama").lower()
-LLM_MODEL = os.getenv("LLM_MODEL", "gemini-2.5-flash")
+# 既定は flash-lite。無印 flash は無料枠(1日あたりのリクエスト数=RPD)が小さいことがあり、
+# 2〜4文の要約には flash-lite で十分。実枠は 429 応答の body / プロバイダのダッシュボードで確認する。
+LLM_MODEL = os.getenv("LLM_MODEL", "gemini-2.5-flash-lite")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_URL = (
     f"https://generativelanguage.googleapis.com/v1beta/models/"
@@ -64,6 +75,30 @@ ALERT_TO_QUERY = {
     "CPU": "rate(node_cpu_seconds_total{mode='idle'}[5m])",
 }
 
+# alertname × OS → 診断スクリプト マッピング。
+# 発火しうる alertname は自分で書いた Alertmanager ルールで閉じている（未知のアラートは来ない）ため、
+# LLM に選ばせず表引きで決定する（LLM クォータ消費ゼロ・決定的・即時）。
+# キーは alertname の部分一致（大文字小文字無視）。該当なしはログ全般調査に落とす。
+ALERT_TO_SCRIPT = {
+    "disk":   {"linux": "linux_disk_inode.sh",      "windows": "win_disk_anomaly.sh"},
+    "memory": {"linux": "linux_memory_pressure.sh", "windows": "win_process_delta.sh"},
+    "cpu":    {"linux": "linux_memory_pressure.sh", "windows": "win_process_delta.sh"},
+    "load":   {"linux": "linux_memory_pressure.sh", "windows": "win_process_delta.sh"},
+}
+DEFAULT_SCRIPT = {
+    "linux": "linux_journal_anomaly.sh",
+    "windows": "win_eventlog_anomaly.sh",
+}
+
+
+def select_script(alertname, os_type):
+    """alertname と OS 種別から診断スクリプトを表引きで決定する"""
+    name = alertname.lower()
+    for key, by_os in ALERT_TO_SCRIPT.items():
+        if key in name:
+            return by_os[os_type]
+    return DEFAULT_SCRIPT[os_type]
+
 # ===== キューイング機構 =====
 alert_queue = deque()
 queue_lock = threading.Lock()
@@ -71,7 +106,13 @@ queue_lock = threading.Lock()
 
 def load_spec():
     with open(SPEC_FILE, "r") as f:
-        return json.load(f)
+        data = json.load(f)
+    # インベントリ JSON はトップレベルが {"hosts": [...]} の辞書想定。
+    # detect_os はホストのリストを期待するため hosts を取り出す。
+    # 旧形式（トップレベルがリスト）にも後方互換で対応。
+    if isinstance(data, dict):
+        return data.get("hosts", [])
+    return data
 
 
 def detect_os(hostname, spec):
@@ -156,25 +197,86 @@ def _call_ollama(prompt, temperature=0.1):
         return None
 
 
-def _call_gemini(prompt, temperature=0.1):
+_gemini_throttle_lock = threading.Lock()
+_gemini_last_call = [0.0]
+
+
+def _gemini_throttle():
+    """無料枠の RPM 超過を防ぐため、Gemini 呼び出し間隔の下限を強制する。"""
+    with _gemini_throttle_lock:
+        wait = GEMINI_MIN_INTERVAL - (time.time() - _gemini_last_call[0])
+        if wait > 0:
+            print(f"[INFO] gemini レート制御: {wait:.1f}s 待機", file=sys.stderr)
+            time.sleep(wait)
+        _gemini_last_call[0] = time.time()
+
+
+def _parse_retry_delay(body):
+    """429 ボディの RetryInfo (例 '"retryDelay": "17s"') から待ち秒数を取り出す。
+    無ければ None。上限 20s に丸める。"""
+    m = re.search(r'"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s?"', body)
+    return min(float(m.group(1)), 20) if m else None
+
+
+def _call_gemini(prompt, temperature=0.1, retries=3):
     if not GEMINI_API_KEY:
         print("[ERROR] GEMINI_API_KEY が未設定", file=sys.stderr)
         return None
-    try:
-        resp = requests.post(
-            GEMINI_URL,
-            params={"key": GEMINI_API_KEY},
-            json={
-                "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {"temperature": temperature},
-            },
-            timeout=TIMEOUT_LLM,
-        )
-        resp.raise_for_status()
-        return resp.json()["candidates"][0]["content"]["parts"][0]["text"]
-    except Exception as e:
-        print(f"[ERROR] gemini 呼び出し失敗: {e}", file=sys.stderr)
-        return None
+    _gemini_throttle()
+    # Gemini は過負荷時に断続的に 503/429 を返す。一時エラーはリトライ。
+    # ただし 429 のうち日次枠(RPD)超過は翌日まで回復しないため、リトライせず即諦める。
+    # リトライ自体もクォータを消費する。
+    for attempt in range(retries):
+        try:
+            # キーはヘッダで渡す。クエリパラメータだと requests の例外メッセージ
+            # (URL込み)経由でログにキーが漏れる。
+            resp = requests.post(
+                GEMINI_URL,
+                headers={"x-goog-api-key": GEMINI_API_KEY},
+                json={
+                    "contents": [{"parts": [{"text": prompt}]}],
+                    "generationConfig": {"temperature": temperature},
+                },
+                timeout=TIMEOUT_LLM,
+            )
+            # 認証・リクエスト不正系(400/401/403)はリトライしても無駄なので即諦める。
+            if resp.status_code in (400, 401, 403):
+                if resp.status_code == 400 and "API_KEY_INVALID" in resp.text:
+                    print("[ERROR] gemini API キーが無効。.env の GEMINI_API_KEY を確認", file=sys.stderr)
+                else:
+                    print(f"[ERROR] gemini {resp.status_code}: {resp.text[:200]}", file=sys.stderr)
+                return None
+            # 日次枠超過 (quotaId に PerDay) は待っても無駄 → リトライせずフォールバック
+            if resp.status_code == 429 and "PerDay" in resp.text:
+                print("[ERROR] gemini 日次無料枠(RPD)超過 → リトライせず即フォールバック: "
+                      + " ".join(resp.text[:200].split()), file=sys.stderr)
+                return None
+            if resp.status_code in (429, 503):
+                if attempt < retries - 1:
+                    # RPM 超過など一時的なもの。RetryInfo があればその秒数、無ければ指数バックオフ
+                    wait = _parse_retry_delay(resp.text) or 2 ** attempt
+                    print(f"[WARN] gemini {resp.status_code}, {wait:.0f}s後リトライ ({attempt+1}/{retries})", file=sys.stderr)
+                    time.sleep(wait)
+                    continue
+                print(f"[ERROR] gemini {resp.status_code} リトライ上限到達: "
+                      + " ".join(resp.text[:200].split()), file=sys.stderr)
+                return None
+            resp.raise_for_status()
+            return resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+        except Exception as e:
+            if attempt < retries - 1:
+                wait = 2 ** attempt
+                print(f"[WARN] gemini 呼び出し失敗 ({e}), {wait}s後リトライ ({attempt+1}/{retries})", file=sys.stderr)
+                time.sleep(wait)
+                continue
+            print(f"[ERROR] gemini 呼び出し失敗: {e}", file=sys.stderr)
+            return None
+
+
+# LLM呼び出し全体のハード上限(秒)。requests の timeout は DNS 解決などを
+# カバーせず無限ハングしうる。正常時の最悪ケース(リトライ+RetryInfo待ち+スロットル)を
+# 見込んで TIMEOUT_LLM の 4 倍を上限にする。
+TIMEOUT_LLM_HARD = TIMEOUT_LLM * 4
 
 
 def call_llm(prompt, temperature=0.1):
@@ -182,27 +284,23 @@ def call_llm(prompt, temperature=0.1):
     LLMを呼び出し、応答テキストを返す。
     失敗時は None を返す（例外を投げない）。
     LLM_PROVIDER で ollama / gemini を切り替える。
+    呼び出しがハングしても TIMEOUT_LLM_HARD で見切って None を返し、
+    スケジューラ全体が止まるのを防ぐ。
     """
-    if LLM_PROVIDER == "gemini":
-        return _call_gemini(prompt, temperature)
-    return _call_ollama(prompt, temperature)
+    fn = _call_gemini if LLM_PROVIDER == "gemini" else _call_ollama
+    result = [None]
 
+    def _target():
+        result[0] = fn(prompt, temperature)
 
-def ask_llm_select(prompt):
-    """LLM にスクリプト選択を依頼。失敗時は None"""
-    response = call_llm(prompt, temperature=0.1)
-    if response is None:
+    t = threading.Thread(target=_target, daemon=True)
+    t.start()
+    t.join(TIMEOUT_LLM_HARD)
+    if t.is_alive():
+        print(f"[ERROR] LLM呼び出しが{TIMEOUT_LLM_HARD}s以内に完了せずハング → 見切ってフォールバック",
+              file=sys.stderr)
         return None
-    # JSON {"script": "xxx.sh"} を抽出
-    match = re.search(r'"script"\s*:\s*"([^"]+)"', response)
-    if match:
-        return match.group(1)
-    for line in response.split("\n"):
-        line = line.strip()
-        for s in WHITELIST:
-            if s in line:
-                return s
-    return response.strip()
+    return result[0]
 
 
 def ask_llm_summarize(alert_info, script_output):
@@ -274,27 +372,8 @@ def process_single_alert(info, spec):
     # Prometheus メトリクス
     metrics = prometheus_query(info["alertname"], info["instance"])
 
-    # LLM スクリプト選択
-    whitelist_str = ", ".join(WHITELIST)
-    select_prompt = f"""以下のアラートが発生した。許可スクリプト一覧から最適なものを1つ選び、JSONで返せ。
-アラート: {info['alertname']}
-インスタンス: {info['instance']}
-OS種別: {os_type}
-severity: {info['severity']}
-summary: {info['summary']}
-
-許可スクリプト: {whitelist_str}
-
-回答形式: {{"script": "スクリプト名.sh"}}
-"""
-    selected = ask_llm_select(select_prompt)
-    if selected is None or selected not in WHITELIST:
-        print(f"スクリプト選択失敗 or 不正: {selected} → フォールバック")
-        if os_type == "windows":
-            selected = "win_process_delta.sh"
-        else:
-            selected = "linux_memory_pressure.sh"
-
+    # スクリプト選択（表引き。LLM は使わない）
+    selected = select_script(info["alertname"], os_type)
     print(f"選択スクリプト: {selected}")
 
     # スクリプト実行
@@ -318,8 +397,13 @@ def process_queue():
     with queue_lock:
         if not alert_queue:
             return
-        alerts = list(alert_queue)
-        alert_queue.clear()
+        n = min(len(alert_queue), MAX_ALERTS_PER_FLUSH)
+        alerts = [alert_queue.popleft() for _ in range(n)]
+        remaining = len(alert_queue)
+
+    if remaining:
+        print(f"[WARN] アラート急増: {len(alerts)}件を処理、残り{remaining}件は次サイクルに繰り越し",
+              file=sys.stderr)
 
     print(f"\n=== キュー処理開始: {len(alerts)}件 ===")
     spec = load_spec()

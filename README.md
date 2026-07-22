@@ -3,7 +3,7 @@
 ![CloseCraw](assets/logo/logo.jpg)
 
 > **一言で言うと**
-> Prometheus が異常を検知したら、AI が状況を判断して SSH 経由で調査スクリプトを実行し、結果を要約して Telegram に通知する。**AI はコマンドを生成しない**（許可スクリプトを選ぶだけ）。
+> Prometheus が異常を検知したら、対応表で調査スクリプトを選んで SSH 実行し、結果を要約して Telegram に通知する。**AI はコマンドを生成せず、スクリプトも選ばない**（スクリプト選択は対応表＝表引き。AI が担うのは「要約」だけ）。
 
 ホームラボ（Linux / OpenWrt / Windows 混在）向けの、LLM 補助つきアラート自動診断エージェント。
 当初はあるホームラボの Windows サーバのメモリ/SSD リーク監視が目的で、現在は複数台の監視に拡張済み。
@@ -24,13 +24,14 @@
    ─── 5 分ごとにバックグラウンドスレッドがまとめて処理 ───
             ↓
    ① Prometheus API で直近 1h のメトリクス取得
-   ② LLM が許可スクリプトを 1 つ選択（失敗時は OS 別デフォルト）
+   ② alertname × OS の対応表で調査スクリプトを 1 つ選択（ALERT_TO_SCRIPT 表引き・LLM 不使用）
    ③ SSH で対象ホスト上にスクリプトを流し込んで実行
    ④ LLM が出力を SRE 風に 2〜4 文へ要約（失敗時は生出力を添付）
             ↓
    [Telegram Bot → 全アラートを 1 通にまとめて通知]
 ```
 
+**LLM が担うのは ④ の要約だけ**（スクリプト選択は表引き＝決定的・クォータ消費ゼロ）。なぜ選択から LLM を外したかは [docs/DESIGN.md](docs/DESIGN.md)。
 LLM は **ollama**（ローカル推論）と **Gemini API** を `LLM_PROVIDER` で切替可能。どちらが落ちても例外を投げず、フォールバックして通知だけは必ず出す設計。
 
 ---
@@ -55,6 +56,7 @@ closecraw/
 │   ├── win_eventlog_anomaly.sh        │
 │   └── win_disk_anomaly.sh            ┘
 ├── docs/
+│   ├── DESIGN.md                      ← 設計メモ（なぜ LLM を選択から外したか＋教訓）
 │   └── inventory.example.json         ← ホストインベントリのサンプル
 ├── assets/logo/         ← ロゴ
 └── logs/                ← ログ出力先（gitignore 対象）
@@ -83,7 +85,7 @@ touch .env
 | `TELEGRAM_TOKEN` | Telegram Bot トークン（必須） |
 | `TELEGRAM_CHAT_ID` | 通知先チャット ID（必須） |
 | `LLM_PROVIDER` | `ollama` または `gemini`（デフォルト `ollama`） |
-| `LLM_MODEL` | 使用モデル名（例 `gemini-2.5-flash`） |
+| `LLM_MODEL` | 使用モデル名（デフォルト `gemini-2.5-flash-lite`。無印 flash は無料枠が小さいことがある） |
 | `GEMINI_API_KEY` | Gemini 利用時のみ必須 |
 | `CLOSECRAW_SPEC_FILE` | ホストインベントリ JSON のパス（デフォルト `/opt/closecraw/inventory.json`） |
 | `CLOSECRAW_SCRIPTS_DIR` | 許可スクリプトの配置ディレクトリ（デフォルト `/opt/closecraw/scripts`） |
@@ -121,9 +123,11 @@ journalctl --user -u alert-handler.service -n 50
 
 | やること | やらないこと |
 |----------|--------------|
-| 許可スクリプトから最適な 1 つを選ぶ | コマンドを自分で生成する |
-| スクリプト出力を人間向けに要約する | SSH 先で自由にシェル操作する |
-| JSON `{"script": "..."}` で名前を返す | ホワイトリスト外のスクリプトを呼ぶ |
+| スクリプト出力を人間向けに 2〜4 文へ要約する | コマンドを自分で生成する |
+| | SSH 先で自由にシェル操作する |
+| | 調査スクリプトを選ぶ（対応表 `ALERT_TO_SCRIPT` で決定・LLM 不使用） |
+
+> AI に与える自由度は「要約」だけ。実行できるコマンドは事前に許可した読み取り専用スクリプトに限られ、どれを走らせるかも表引きで機械的に決まる。
 
 ---
 
@@ -174,7 +178,9 @@ journalctl --user -u alert-handler.service -n 20
 
 ## 設計メモ
 
-- アラートは即処理せず **5 分間キューに溜めてバッチ処理** → 通知を 1 通にまとめ、スパムと LLM 呼び出し回数を抑制。
+- アラートは即処理せず **5 分間キューに溜めてバッチ処理** → 通知を 1 通にまとめ、スパムと LLM 呼び出し回数を抑制。1 回の掃き出し上限は `MAX_ALERTS_PER_FLUSH`（超過分は次サイクルへ繰り越し）。
 - `alertname` → PromQL は `ALERT_TO_QUERY` で対応付け（未定義なら `up` をフォールバック取得）。
-- LLM 選択・要約は両方とも失敗を許容（None 返却）し、選択は OS 別デフォルト、要約は生出力添付でフォールバック。
-- 実行できるのは `WHITELIST` 内のスクリプトのみ（LLM が外の名前を返しても弾く）。
+- **診断スクリプトの選択は `ALERT_TO_SCRIPT` の表引き**（alertname 部分一致 × OS）。該当なしはログ全般調査に落とす。**LLM は使わない**（クォータ消費ゼロ・決定的）。経緯は [docs/DESIGN.md](docs/DESIGN.md)。
+- LLM 要約は失敗を許容（None 返却）し、生出力添付でフォールバック（**通知は必ず出す**）。LLM 呼び出しにはハード上限があり、ハングでスケジューラを止めない。
+- 実行できるのは `WHITELIST` 内のスクリプトのみ。
+- Gemini 利用時は 429 応答の body で日次枠(RPD)/毎分枠(RPM)超過を判別し、RPD 超過はリトライしない（翌日まで回復しないものに連打してもクォータを消費するだけ）。API キーはヘッダで渡す（クエリパラメータだと例外メッセージ経由でログに漏れる）。
