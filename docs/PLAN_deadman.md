@@ -164,7 +164,9 @@ silent 故障は "悪い値の存在" ではなく "信号の不在" として�
 - **`:8100` の常駐性**：スロット中のみ起動か常時常駐かを確認（未達＝off-air なのか制御プレーン死なのかの解釈に効く）。
 - **コードネーム**：沈黙を聞き分け角笛で報せる者＝神話系の候補あり（任意・急がない）。
 
-## 11. 次の一手（Phase 0 の最初の一歩）
-1. ~~放送の "生存の証" を確定~~ ✅ 済（2026-08-21）＝`:8100/api/status` ＋ `.mkv` 成長クロスチェック。
-2. その状態を読んで textfile に 1 メトリクスだけ書く最小プローバを置く（`closecraw_liveness_last_ok_seconds{target="broadcast"}`）。
-3. staleness ルール 1 本と対応表 1 行を足し、わざと止めて Telegram が鳴るまでを通す。
+## 11. 進捗と次の一手（Phase 0）
+1. ✅ 放送の "生存の証" を確定（2026-08-21）＝`:8100/api/status` ＋ `.mkv` 成長クロスチェック。
+2. ✅ 最小プローバ `src/liveness_prober.py`（6分岐を注入テストで検証・`.prom` を atomic 出力・off-air ゲート実機確認）。
+3B. ✅ 沈黙時アラートを `notifier` 直結で配線＋`--simulate`/`--alert`＋cooldown。ドライラン文面確認済。**実際の "鳴る" は本人が secrets を持って `!` で発火**（`TELEGRAM_BOT_TOKEN` は稼働側 `~/scripts/secrets.env`）。
+3A. ⬜ 本筋：Prometheus/Alertmanager スタックを見つけ、textfile collector ＋ staleness ルール ＋ 対応表1行で既存パイプラインへ載せ替える（`:8100` 常駐性の確認込み）。
+4. ⬜ Phase 1：`ScheduledPublishMissed`／`TimerSkipped`／状態盤／content-silent(show_log)。
