@@ -1,0 +1,35 @@
+# CloseCraw deadman — 放送(broadcast)の沈黙アラート（bifrost の Prometheus 用）
+# 設置先: /etc/prometheus/rules/broadcast_alerts.yml
+#   + prometheus.yml の rule_files に本ファイルを1行追加 → Prometheus reload。
+# 仕組み: プローバ(durandal)が生存の証 closecraw_liveness_last_ok_seconds を60s毎に前進させる。
+#   健全 or off-air の時だけ前進＝壊れ/プローバ停止で凍る。凍って閾値を超えたら発火。
+#   alertname×OS で CloseCraw の ALERT_TO_SCRIPT が引かれる(os=linux)。未マッピングでも
+#   DESIGN.md 通り一般ログ調査にフォールバック＝事故にならない。
+groups:
+  - name: broadcast_alerts
+    rules:
+      # 本命: 放送が「動いてるように見えて中身が出てない/届いてない」= 生存の証が古びた
+      - alert: BroadcastSilent
+        expr: time() - closecraw_liveness_last_ok_seconds{target="broadcast"} > 90
+        for: 0m
+        labels:
+          severity: warning
+          os: linux
+        annotations:
+          summary: "放送が沈黙: broadcast の生存の証が {{ $value | humanizeDuration }} 更新されていない"
+          description: >-
+            closecraw_liveness_last_ok_seconds{target=broadcast} が90秒以上前進していない。
+            streaming中の obs断 / relay leg down / mkv凍結、またはプローバ停止の疑い（durandal:9100 経由）。
+
+      # 番犬の番犬: プローバ自身が止まった時の切り分け（60s timer が回っていない）
+      - alert: BroadcastProberStale
+        expr: time() - closecraw_liveness_prober_run_seconds > 150
+        for: 0m
+        labels:
+          severity: warning
+          os: linux
+        annotations:
+          summary: "沈黙検知プローバが停止: prober_run が {{ $value | humanizeDuration }} 前進していない"
+          description: >-
+            closecraw-liveness.timer(durandal・60s間隔)が回っていない疑い。
+            これが出たら BroadcastSilent の原因はプローバ死＝放送本体の沈黙と切り分ける。
