@@ -28,6 +28,7 @@ prober_run_seconds を別に出して「番犬は生きてるが放送が壊れ�
 """
 from __future__ import annotations
 
+import argparse
 import json
 import glob
 import os
@@ -160,26 +161,97 @@ def _prom(state: dict, ev: dict, now: float) -> str:
     return "".join(out)
 
 
+def build_alert_message(ev: dict, now: float) -> str:
+    """沈黙を人が読める1通に。Phase0(③B)は生の判定を送る＝LLM要約は後段/パイプライン側。"""
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now))
+    age = f"{ev['mkv_age']:.0f}s" if ev["mkv_age"] is not None else "NA"
+    return (
+        "🔴 CloseCraw deadman — broadcast 沈黙検知\n"
+        f"{ev['verdict']}\n"
+        f"streaming={ev['streaming']} obs={ev['obs_ok']} legs_ok={ev['legs_ok']} mkv_age={age}\n"
+        f"{stamp}"
+    )
+
+
+def _first_chat(s: str) -> str:
+    for tok in s.replace(",", " ").split():
+        return tok.strip()
+    return ""
+
+
+def _apply_simulate(kind: str):
+    """本物の放送に触れず沈黙を注入して検知→通知ループを検証する（③B の "わざと止める"）。"""
+    global _get_status, _newest_mkv_age
+    live = {"streaming": True, "obs_connected": True,
+            "relay_legs": {"youtube": {"up": True}, "twitch": {"up": True}}}
+    if kind == "mkv-frozen":       # 録画は回るが中身が黙る（TTSハング）
+        _get_status = lambda: dict(live); _newest_mkv_age = lambda now: 300
+    elif kind == "leg-down":       # YouTube に届いていない
+        s = {**live, "relay_legs": {"youtube": {"up": False}, "twitch": {"up": True}}}
+        _get_status = lambda: s; _newest_mkv_age = lambda now: 5
+    elif kind == "obs-down":       # OBS 断
+        s = {**live, "obs_connected": False}
+        _get_status = lambda: s; _newest_mkv_age = lambda now: 5
+    elif kind == "control-down":   # 制御プレーン死＋mkv凍結
+        _get_status = lambda: None; _newest_mkv_age = lambda now: 300
+
+
 def main() -> int:
+    ap = argparse.ArgumentParser(description="broadcast 沈黙検知プローバ (Phase0)")
+    ap.add_argument("--simulate", choices=["mkv-frozen", "leg-down", "obs-down", "control-down"],
+                    help="本物の放送に触れず沈黙を注入して検証する")
+    ap.add_argument("--alert", action="store_true",
+                    help="沈黙時に実際に Telegram へ送る(要 TELEGRAM_BOT_TOKEN + chat)。既定はドライラン表示")
+    args = ap.parse_args()
+
+    if args.simulate:
+        _apply_simulate(args.simulate)
+
     now = time.time()
     ev = evaluate(now)
     state = _load_state()
+    st = state.setdefault(TARGET, {})
 
     # 健全（＝生存 or off-air）な時だけ last_ok を前進させる。壊れなら据え置き＝古びさせる。
     if ev["healthy"]:
-        state.setdefault(TARGET, {})["last_ok"] = now
-    state.setdefault(TARGET, {})["last_run"] = now
+        st["last_ok"] = now
+        st.pop("alerted_at", None)   # 復旧＝次の沈黙で再通知できるようにする
+    st["last_run"] = now
+
+    # ---- 沈黙時のアラート（③B: notifier 直結の近道・cooldownでスパム抑制=DESIGN.md流儀） ----
+    alerted = "healthy"
+    if not ev["healthy"]:
+        msg = build_alert_message(ev, now)
+        cooldown = float(os.environ.get("LIVENESS_ALERT_COOLDOWN_S", "900"))
+        recent = (now - st.get("alerted_at", 0)) < cooldown
+        if not args.alert:
+            alerted = "dry-run"
+        elif recent:
+            alerted = "cooldown中(抑制)"
+        else:
+            token = os.environ.get("LIVENESS_TG_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN")
+            chat = (os.environ.get("LIVENESS_TG_CHAT") or os.environ.get("TELEGRAM_CHAT_ID")
+                    or _first_chat(os.environ.get("TG_CLAUDE_ALLOWED_CHATS", "")))
+            if not (token and chat):
+                alerted = "no-creds(TELEGRAM_BOT_TOKEN と chat を環境に)"
+            else:
+                import notifier   # requests 依存＝送る時だけ import（ドライランは不要）
+                ok = notifier.send_telegram(token, chat, msg)
+                if ok:
+                    st["alerted_at"] = now
+                alerted = "sent" if ok else "send-failed"
+        if alerted in ("dry-run", "no-creds(TELEGRAM_BOT_TOKEN と chat を環境に)"):
+            print("---- 送られるメッセージ ----\n" + msg + "\n---------------------------")
 
     _atomic_write(STATE_FILE, json.dumps(state, ensure_ascii=False, indent=2))
     _atomic_write(TEXTFILE, _prom(state, ev, now))
 
-    last_ok = state[TARGET]["last_ok"]
+    last_ok = st.get("last_ok", now)
     silent_for = now - last_ok
     stamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now))
-    print(f"{stamp} target={TARGET} verdict={ev['verdict']} "
-          f"healthy={int(ev['healthy'])} last_ok前={silent_for:.0f}s "
-          f"mkv_age={('%.0f' % ev['mkv_age']) if ev['mkv_age'] is not None else 'NA'}s "
-          f"-> {TEXTFILE}")
+    print(f"{stamp} target={TARGET} verdict={ev['verdict']} healthy={int(ev['healthy'])} "
+          f"alert={alerted} last_ok前={silent_for:.0f}s "
+          f"mkv_age={('%.0f' % ev['mkv_age']) if ev['mkv_age'] is not None else 'NA'}s")
     return 0
 
 
