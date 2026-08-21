@@ -1,0 +1,11 @@
+[Unit]
+Description=Run CloseCraw deadman liveness prober every 60s
+
+[Timer]
+OnBootSec=60
+OnUnitActiveSec=60
+AccuracySec=5s
+Unit=closecraw-liveness.service
+
+[Install]
+WantedBy=timers.target

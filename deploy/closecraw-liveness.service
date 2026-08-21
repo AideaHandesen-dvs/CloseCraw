@@ -1,0 +1,12 @@
+[Unit]
+Description=CloseCraw deadman liveness prober (broadcast sink)
+Documentation=file:///home/john/closecraw-port/docs/PLAN_deadman.md
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=john
+WorkingDirectory=/home/john/closecraw-port
+# node_exporter(root) が読む textfile collector へ .prom を書く（dir は john 所有）
+Environment=LIVENESS_TEXTFILE=/var/lib/node_exporter/textfile_collector/closecraw_liveness.prom
+ExecStart=/usr/bin/python3 /home/john/closecraw-port/src/liveness_prober.py
