@@ -142,7 +142,7 @@ silent 故障は "悪い値の存在" ではなく "信号の不在" として�
 - 対象は `BroadcastSilent` **一つだけ**。
 - `liveness_prober.py` が放送出力の mtime を読む → textfile → staleness ルール →（既存パイプライン）→ Telegram。
 - 調査スクリプト 1 本（放送プロセスの状態・直近ログ・GPU/CPU の忙しさを読み取り専用で集める）。
-- **達成条件＝わざと放送を止めて、締切後に Telegram が鳴る**（＝沈黙を初めて一件捕まえた）。
+- **達成条件＝わざと放送を止めて、締切後に Telegram が鳴る**（＝沈黙を初めて一件捕まえた）。→ **✅ 達成（2026-08-22・durandal）**：手動実発火＋常駐自鳴化まで完了（詳細は §11 の 3C/3D）。
 
 **Phase 1 ―― 対象を精鋭 2 系統に広げる＋盤**
 - `ScheduledPublishMissed` と `TimerSkipped` を追加（受動ソース＋staleness ルール＋調査スクリプト＋対応表行）。
@@ -167,6 +167,8 @@ silent 故障は "悪い値の存在" ではなく "信号の不在" として�
 ## 11. 進捗と次の一手（Phase 0）
 1. ✅ 放送の "生存の証" を確定（2026-08-21）＝`:8100/api/status` ＋ `.mkv` 成長クロスチェック。
 2. ✅ 最小プローバ `src/liveness_prober.py`（6分岐を注入テストで検証・`.prom` を atomic 出力・off-air ゲート実機確認）。
-3B. ✅ 沈黙時アラートを `notifier` 直結で配線＋`--simulate`/`--alert`＋cooldown。ドライラン文面確認済。**実際の "鳴る" は本人が secrets を持って `!` で発火**（`TELEGRAM_BOT_TOKEN` は稼働側 `~/scripts/secrets.env`）。
+3B. ✅ 沈黙時アラートを `notifier` 直結で配線＋`--simulate`/`--alert`＋cooldown。ドライラン文面確認済（`TELEGRAM_BOT_TOKEN` は稼働側 `~/scripts/secrets.env`）。
+3C. ✅ **初の実発火（2026-08-22 10:47:59・durandal）**＝`--simulate mkv-frozen --alert` で本人 secrets を読み実送信。`alert=sent`＋Telegram に🔴着弾（＝"人間の画面"まで到達）＋`state.json` に `alerted_at` 記録。**＝§9 Phase 0 達成条件クリア（わざと止めて鳴った）**。
+3D. ✅ **常駐自鳴化（2026-08-22・durandal）**＝既導入の system timer（`/etc/systemd/system/closecraw-liveness.{service,timer}`・60s・enabled）へ drop-in（`deploy/closecraw-liveness.service.d/alert.conf` → `/etc/systemd/system/…service.d/alert.conf`）で `--alert`＋`EnvironmentFile=~/scripts/secrets.env` を注入。実効 ExecStart に `--alert` 反映・実 run `Result=success/status=0` 確認。以後、放送 live 中の沈黙は**人手なしで自鳴**。cooldown は復旧で自動再武装（`liveness_prober.py:217` が healthy 時 `alerted_at` を pop）。
 3A. ⬜ 本筋：Prometheus/Alertmanager スタックを見つけ、textfile collector ＋ staleness ルール ＋ 対応表1行で既存パイプラインへ載せ替える（`:8100` 常駐性の確認込み）。
 4. ⬜ Phase 1：`ScheduledPublishMissed`／`TimerSkipped`／状態盤／content-silent(show_log)。
