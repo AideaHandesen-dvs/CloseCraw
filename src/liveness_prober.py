@@ -15,6 +15,10 @@ CloseCraw の欠けた片割れ＝「出るべき信号が出ていない＝沈�
   - streaming=false（off-air）        → 対象外。沈黙ではない＝last_ok を now に進める（鳴らさない）。
   - streaming=true かつ 健全          → 生存。last_ok=now。
   - streaming=true かつ 壊れ          → last_ok を進めない＝時間が経つと staleness ルールが発火する。
+  - go-live 猶予（LIVENESS_GOLIVE_GRACE_S 内・streaming が false→true に転じた直後）で、
+    欠けが「mkv 鮮度」だけ（OBS/leg は健全）→ 暖機中＝録画が新鮮化する数十秒を沈黙としない。
+    ＝制御盤は go-live で即 streaming=true を返すのに録画 .mkv が新鮮に映るまで約1分のレースがあり、
+      その1周期だけ「live・沈黙=mkv不在」を誤射していた（実測 2026-08-25 23:00 / 08-26 22:00 枠頭）。
   - :8100 に届かない                  → 制御プレーンが応答しない。mkv 鮮度だけで best-effort 判定し degraded を立てる。
 
 出力（Phase 0 は自己完結・Prometheus 配線は step3）:
@@ -41,6 +45,10 @@ import urllib.request
 STATUS_URL   = os.environ.get("LIVENESS_STATUS_URL", "http://127.0.0.1:8100/api/status")
 STREAM_DIR   = os.environ.get("LIVENESS_STREAM_DIR", "/mnt/data/stream")
 MKV_STALE_S  = float(os.environ.get("LIVENESS_MKV_STALE_S", "30"))     # mkv がこの秒数書かれてなければ凍結
+# go-live 直後、制御盤は即 streaming=true を返すが録画 mkv が新鮮に映るまで約1分かかる。
+# その転移から本秒数の間は「mkv だけが未鮮度」を沈黙とせず暖機中扱いにする（枠頭の1周期誤射を吸収）。
+# 定常配信中の凍結検知(MKV_STALE_S)には影響しない＝猶予は false→true 転移時にだけ効く。
+GOLIVE_GRACE_S = float(os.environ.get("LIVENESS_GOLIVE_GRACE_S", "120"))
 HTTP_TIMEOUT = float(os.environ.get("LIVENESS_HTTP_TIMEOUT", "4"))
 _here = os.path.dirname(os.path.abspath(__file__))
 _deflog = os.path.join(os.path.dirname(_here), "logs")
@@ -91,8 +99,8 @@ def _atomic_write(path: str, data: str):
             os.remove(tmp)
 
 
-def evaluate(now: float):
-    """一次対象 broadcast の生存を判定して dict を返す。"""
+def probe(now: float) -> dict:
+    """生の生存信号だけ採る（判定は decide へ分離＝go-live 猶予に state が要るため）。"""
     status = _get_status()
     mkv_age = _newest_mkv_age(now)
     mkv_fresh = (mkv_age is not None and mkv_age < MKV_STALE_S)
@@ -108,6 +116,24 @@ def evaluate(now: float):
         if isinstance(leg, dict) and leg.get("up") is False:
             legs_ok = False
 
+    return {
+        "reachable": reachable, "streaming": streaming, "obs_ok": obs_ok,
+        "legs_ok": legs_ok, "mkv_age": mkv_age, "mkv_fresh": mkv_fresh,
+    }
+
+
+def decide(sig: dict, now: float, streaming_since: float | None = None) -> dict:
+    """信号→生死判定。streaming_since 指定時は go-live 猶予を効かせる。
+
+    streaming_since = streaming が false→true に転じた unix 秒（main が state で追跡）。
+    暖機中（転移後 GOLIVE_GRACE_S 内・欠けが mkv 鮮度だけ・OBS/leg 健全）は沈黙とせず healthy=True＝
+    last_ok を進めて枠頭の1周期誤射（BroadcastSilent / プローバ直 --alert）を抑える。
+    """
+    reachable, streaming = sig["reachable"], sig["streaming"]
+    obs_ok, legs_ok = sig["obs_ok"], sig["legs_ok"]
+    mkv_age, mkv_fresh = sig["mkv_age"], sig["mkv_fresh"]
+    warming = False
+
     if not reachable:
         # 制御プレーンが応答しない。mkv 鮮度で best-effort。degraded を立てる。
         healthy = bool(mkv_fresh)
@@ -120,6 +146,12 @@ def evaluate(now: float):
         healthy = bool(obs_ok and legs_ok and mkv_fresh)
         if healthy:
             verdict = "live・健全"
+        elif (streaming_since is not None and (now - streaming_since) < GOLIVE_GRACE_S
+              and obs_ok and legs_ok and not mkv_fresh):
+            # go-live 猶予：立ち上げ直後で欠けが mkv 鮮度だけ＝録画が新鮮化する前の暖機中。
+            warming = True
+            healthy = True
+            verdict = f"live・暖機中(go-live {now - streaming_since:.0f}s・mkv待ち)"
         else:
             why = []
             if not obs_ok:   why.append("OBS断")
@@ -127,11 +159,14 @@ def evaluate(now: float):
             if not mkv_fresh: why.append(f"mkv凍結({mkv_age:.0f}s無更新)" if mkv_age is not None else "mkv不在")
             verdict = "live・沈黙=" + "/".join(why)
 
-    return {
-        "reachable": reachable, "streaming": streaming, "obs_ok": obs_ok,
-        "legs_ok": legs_ok, "mkv_age": mkv_age, "mkv_fresh": mkv_fresh,
-        "healthy": healthy, "verdict": verdict,
-    }
+    ev = dict(sig)
+    ev.update({"healthy": healthy, "verdict": verdict, "warming": warming})
+    return ev
+
+
+def evaluate(now: float, streaming_since: float | None = None) -> dict:
+    """probe→decide の薄いラッパ（後方互換・単発判定用）。"""
+    return decide(probe(now), now, streaming_since)
 
 
 def _prom(state: dict, ev: dict, now: float) -> str:
@@ -208,9 +243,21 @@ def main() -> int:
         _apply_simulate(args.simulate)
 
     now = time.time()
-    ev = evaluate(now)
     state = _load_state()
     st = state.setdefault(TARGET, {})
+
+    sig = probe(now)
+    # go-live 猶予のため streaming の false→true 転移時刻を跨ぎで憶える。
+    if sig["streaming"] is True:
+        if not st.get("streaming_prev"):
+            st["streaming_since"] = now          # 立ち上がった瞬間を刻む（既に true なら据え置き）
+        streaming_since = st.get("streaming_since")
+    else:
+        st.pop("streaming_since", None)          # off-air/不応答は転移追跡をリセット
+        streaming_since = None
+    st["streaming_prev"] = (sig["streaming"] is True)
+
+    ev = decide(sig, now, streaming_since)
 
     # 健全（＝生存 or off-air）な時だけ last_ok を前進させる。壊れなら据え置き＝古びさせる。
     if ev["healthy"]:
