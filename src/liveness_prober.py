@@ -147,11 +147,14 @@ def decide(sig: dict, now: float, streaming_since: float | None = None) -> dict:
         if healthy:
             verdict = "live・健全"
         elif (streaming_since is not None and (now - streaming_since) < GOLIVE_GRACE_S
-              and obs_ok and legs_ok and not mkv_fresh):
-            # go-live 猶予：立ち上げ直後で欠けが mkv 鮮度だけ＝録画が新鮮化する前の暖機中。
+              and obs_ok and (not legs_ok or not mkv_fresh)):
+            # go-live 猶予：立ち上げ直後は relay leg と録画 mkv の両方がまだ上がっていない
+            # 周期がある（2026-09-14 22:00 に legs_ok=False/mkv_age=NA で誤射した）。
+            # OBS さえ繋がっていれば暖機中とみなし、沈黙扱いにしない。
             warming = True
             healthy = True
-            verdict = f"live・暖機中(go-live {now - streaming_since:.0f}s・mkv待ち)"
+            waiting = "・".join(w for w, ok in (("relay leg 待ち", legs_ok), ("mkv 待ち", mkv_fresh)) if not ok)
+            verdict = f"live・暖機中(go-live {now - streaming_since:.0f}s・{waiting})"
         else:
             why = []
             if not obs_ok:   why.append("OBS断")
