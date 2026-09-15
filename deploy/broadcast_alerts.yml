@@ -3,23 +3,22 @@
 #   + prometheus.yml の rule_files に本ファイルを1行追加 → Prometheus reload。
 # 仕組み: プローバ(durandal)が生存の証 closecraw_liveness_last_ok_seconds を60s毎に前進させる。
 #   健全 or off-air の時だけ前進＝壊れ/プローバ停止で凍る。凍って閾値を超えたら発火。
+# ★2026-09-15 以降、放送本体の沈黙はプローバ直結(--alert)が一次通知。本ファイルの役目は
+#   「プローバ自身が止まったこと」の検知(BroadcastProberStale)だけに絞ってある。
 #   alertname×OS で CloseCraw の ALERT_TO_SCRIPT が引かれる(os=linux)。未マッピングでも
 #   DESIGN.md 通り一般ログ調査にフォールバック＝事故にならない。
 groups:
   - name: broadcast_alerts
     rules:
-      # 本命: 放送が「動いてるように見えて中身が出てない/届いてない」= 生存の証が古びた
-      - alert: BroadcastSilent
-        expr: time() - closecraw_liveness_last_ok_seconds{target="broadcast"} > 90
-        for: 0m
-        labels:
-          severity: warning
-          os: linux
-        annotations:
-          summary: "放送が沈黙: broadcast の生存の証が {{ $value | humanizeDuration }} 更新されていない"
-          description: >-
-            closecraw_liveness_last_ok_seconds{target=broadcast} が90秒以上前進していない。
-            streaming中の obs断 / relay leg down / mkv凍結、またはプローバ停止の疑い（durandal:9100 経由）。
+      # ★BroadcastSilent(放送本体の沈黙)は 2026-09-15 に撤去した。設置先からも外してある。
+      #   同じ事象を durandal のプローバ直結(drop-in alert.conf の --alert)が送っており、
+      #   あちらは即時で「何が欠けたか」(legs_ok / mkv_age / OBS断)まで含む。対してこちらは
+      #   90秒しきい値＋評価間隔で5分遅れるうえ、monitor 側の診断も専用の材料を持たない
+      #   (ALERT_TO_SCRIPT に該当が無く linux_journal_anomaly.sh に落ちるだけ)ため、
+      #   重複した無情報通知にしかならなかった。
+      #   監視の空白は無い: 沈黙=プローバ直結 / プローバの死=下の BroadcastProberStale /
+      #   ホスト死=HostDown。bifrost が落ちてもプローバ直結は durandal 単体で鳴る。
+      #   ∴ このファイルから設置するのは BroadcastProberStale だけでよい。
 
       # 番犬の番犬: プローバ自身が止まった時の切り分け（60s timer が回っていない）
       - alert: BroadcastProberStale
