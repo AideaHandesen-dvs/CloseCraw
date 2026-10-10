@@ -8,6 +8,7 @@ LLM が担うのは「診断結果の要約」だけ。詳細は docs/DESIGN.md 
 """
 import json
 import re
+import socket
 import subprocess
 import sys
 import time
@@ -37,6 +38,9 @@ TIMEOUT_SCRIPT = 120
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 PROCESS_INTERVAL = 300  # 5分ごとにキュー処理
+# 自分自身を指すホスト名。診断スクリプトには "localhost" を渡して ssh を省かせる
+# （自ホストに ssh 鍵が無い環境なので、ホスト名のままだと必ず Permission denied になる）。
+LOCAL_HOSTNAMES = {socket.gethostname(), socket.getfqdn(), "localhost", "127.0.0.1"}
 
 # Gemini 無料枠(RPM)対策。アラートストーム時の連投を抑える。
 # 呼び出し間隔の下限(秒)。
@@ -64,6 +68,7 @@ WHITELIST = [
     "win_disk_anomaly.sh",
     "linux_memory_pressure.sh",
     "linux_disk_inode.sh",
+    "linux_cpu_top.sh",
     "linux_journal_anomaly.sh",
 ]
 
@@ -82,8 +87,11 @@ ALERT_TO_QUERY = {
 ALERT_TO_SCRIPT = {
     "disk":   {"linux": "linux_disk_inode.sh",      "windows": "win_disk_anomaly.sh"},
     "memory": {"linux": "linux_memory_pressure.sh", "windows": "win_process_delta.sh"},
-    "cpu":    {"linux": "linux_memory_pressure.sh", "windows": "win_process_delta.sh"},
-    "load":   {"linux": "linux_memory_pressure.sh", "windows": "win_process_delta.sh"},
+    # cpu/load をメモリのスクリプトに当てていたため、CPU アラートの通知が
+    # 「メモリプレッシャーや OOM は観測されていない」で埋まっていた(実運用で発生)。
+    # CPU の話は CPU の材料(/proc/pressure/cpu・vmstat・top)で埋める。
+    "cpu":    {"linux": "linux_cpu_top.sh",         "windows": "win_process_delta.sh"},
+    "load":   {"linux": "linux_cpu_top.sh",         "windows": "win_process_delta.sh"},
 }
 DEFAULT_SCRIPT = {
     "linux": "linux_journal_anomaly.sh",
@@ -306,31 +314,25 @@ def call_llm(prompt, temperature=0.1):
 def ask_llm_summarize(alert_info, script_output):
     """診断結果を要約。失敗時は None"""
     prompt = f"""# 役割
-シニアSREとして診断結果を要約せよ。
+シニアSREとして、与えられた診断結果だけを根拠に、アラートの状況を要約せよ。
 
 # ルール
 - 2〜4文で出力する
 - 敬語は禁止
-- 最も重要なプロセスのみ言及する
-- 軽微な変動は「わずか」と表現する
+- 診断結果に書かれていないことは書くな。数値・プロセス名・件数は診断結果にあるものだけを使う
+- 判断材料が足りないときは空欄を埋めようとせず、「このアラートに対する材料は取れなかった」と述べる
 - 推測しない
 - 最後の文は必ず次のいずれかで終える
   - アクション不要。
   - 要監視。
   - 要調査。
 
-# 必ず含める項目
-1. 最も増加したプロセス名
-2. 増加量
-3. 実害の有無
-4. 結論
-
-#診断結果
-元アラート: {alert_info['alertname']} (host: {alert_info['hostname']})
+# 元アラート
+{alert_info['alertname']} (host: {alert_info['hostname']})
 severity: {alert_info['severity']}
 summary: {alert_info['summary']}
 
-診断結果:
+# 診断結果（スクリプト生出力）
 {script_output[:3000]}
 """
 
@@ -342,13 +344,20 @@ summary: {alert_info['summary']}
 
 
 def run_script(script_name, hostname):
-    """許可スクリプトを SSH 実行"""
+    """許可スクリプトを実行する。
+
+    自ホスト宛だけは "localhost" を渡す: スクリプトは localhost なら ssh を省いて
+    その場で走る作りだが、ホスト名を渡すと監視サーバ自身へ `ssh <自分>` することになり、
+    自分宛の公開鍵が無い環境では exit=255 Permission denied で必ず失敗する
+    （実運用で、監視サーバ自身のアラートの通知が ssh のエラー文だけになっていた）。
+    """
     script_path = SCRIPTS_DIR / script_name
     if not script_path.exists():
         return f"エラー: スクリプトが見つかりません ({script_path})"
+    target = "localhost" if hostname in LOCAL_HOSTNAMES else hostname
     try:
         result = subprocess.run(
-            [str(script_path), hostname],
+            [str(script_path), target],
             capture_output=True,
             text=True,
             timeout=TIMEOUT_SCRIPT
@@ -380,12 +389,20 @@ def process_single_alert(info, spec):
     script_output = run_script(selected, hostname)
     print(f"スクリプト出力先頭500文字: {script_output[:500]}")
 
-    # LLM 要約
-    summary = ask_llm_summarize(info, script_output)
+    # スクリプトがそもそも走っていない出力（実行エラー/タイムアウト/スクリプト不在）を
+    # LLM に渡すと、空欄を埋めようとして存在しない観測を書く。要約せずそのまま伝える。
+    script_failed = script_output.lstrip().startswith(
+        ("エラー:", "スクリプト実行エラー", "スクリプト実行例外", "スクリプトが見つかりません"))
+    if script_failed:
+        print("スクリプトが実行できていないため LLM 要約をスキップ", file=sys.stderr)
+        summary = f"（診断スクリプトが実行できていない。出力をそのまま示す）\n\n```\n{script_output[:1500]}\n```"
+    else:
+        # LLM 要約
+        summary = ask_llm_summarize(info, script_output)
 
-    # 要約失敗時のフォールバック通知
-    if summary is None:
-        summary = f"（AI要約に失敗しました。スクリプト生出力を以下に示します）\n\n```\n{script_output[:1500]}\n```"
+        # 要約失敗時のフォールバック通知
+        if summary is None:
+            summary = f"（AI要約に失敗しました。スクリプト生出力を以下に示します）\n\n```\n{script_output[:1500]}\n```"
 
     # 通知メッセージ
     message = f"*【診断完了】{hostname}: {info['alertname']}*\n\n{summary}"

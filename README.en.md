@@ -64,6 +64,7 @@ closecraw/
 │   ├── script_tester.sh
 │   ├── linux_memory_pressure.sh       ┐
 │   ├── linux_disk_inode.sh            │
+│   ├── linux_cpu_top.sh               │
 │   ├── linux_journal_anomaly.sh       ├ approved scripts (whitelist)
 │   ├── win_process_delta.sh           │
 │   ├── win_eventlog_anomaly.sh        │
@@ -150,6 +151,7 @@ journalctl --user -u alert-handler.service -n 50
 |-----------|---------|------|
 | `linux_memory_pressure.sh` | Linux | PSI / vmstat OOM / dmesg OOM |
 | `linux_disk_inode.sh` | Linux | df / inode / deleted-but-unreleased files |
+| `linux_cpu_top.sh` | Linux | PSI(cpu) / vmstat us・sy・wa / instantaneous top CPU consumers / D-state processes |
 | `linux_journal_anomaly.sh` | Linux | recent error logs tallied by frequency |
 | `win_process_delta.sh` | Windows | top 10 working-set growth over a few seconds |
 | `win_eventlog_anomaly.sh` | Windows | event-log errors tallied by type |

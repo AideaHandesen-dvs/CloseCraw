@@ -63,6 +63,7 @@ closecraw/
 │   ├── script_tester.sh
 │   ├── linux_memory_pressure.sh       ┐
 │   ├── linux_disk_inode.sh            │
+│   ├── linux_cpu_top.sh               │
 │   ├── linux_journal_anomaly.sh       ├ 許可スクリプト（ホワイトリスト）
 │   ├── win_process_delta.sh           │
 │   ├── win_eventlog_anomaly.sh        │
@@ -149,6 +150,7 @@ journalctl --user -u alert-handler.service -n 50
 |-----------|---------|------|
 | `linux_memory_pressure.sh` | Linux | PSI / vmstat OOM / dmesg OOM |
 | `linux_disk_inode.sh` | Linux | df / inode / 削除済み未解放ファイル |
+| `linux_cpu_top.sh` | Linux | PSI(cpu) / vmstat の us・sy・wa / 瞬間の CPU 上位 / D 状態 |
 | `linux_journal_anomaly.sh` | Linux | 直近のエラーログを頻度順集計 |
 | `win_process_delta.sh` | Windows | 数秒間のワーキングセット増加 TOP10 |
 | `win_eventlog_anomaly.sh` | Windows | イベントログのエラー種類別集計 |
