@@ -1,0 +1,16 @@
+# CloseCraw deadman — 定時ジョブの沈黙検知（TimerSkipped）。systemd --user 用。
+# 設置: install -Dm644 deploy/closecraw-timer-prober.{service,timer} -t ~/.config/systemd/user/
+#       systemctl --user daemon-reload && systemctl --user enable --now closecraw-timer-prober.timer
+# 取消: systemctl --user disable --now closecraw-timer-prober.timer
+# user と system の両方の timer を読む（system 側も読むだけなら権限は要らない）。
+[Unit]
+Description=CloseCraw deadman: silent timer prober (TimerSkipped)
+Documentation=file:///home/john/closecraw-port/docs/PLAN_deadman.md
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/john/closecraw-port
+# Telegram の creds（TELEGRAM_BOT_TOKEN / chat）。--alert は沈黙に入った/抜けた時だけ送る。
+EnvironmentFile=-/home/john/scripts/secrets.env
+Environment=TIMER_TEXTFILE=/var/lib/node_exporter/textfile_collector/closecraw_timer.prom
+ExecStart=/usr/bin/python3 /home/john/closecraw-port/src/timer_prober.py --alert

@@ -1,0 +1,10 @@
+[Unit]
+Description=Run CloseCraw silent timer prober every 5min
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=5min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target
