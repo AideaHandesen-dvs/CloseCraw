@@ -98,6 +98,32 @@ def show_props(scope: str, units: list[str]) -> dict[str, dict]:
     return props
 
 
+def service_times(scope: str, units: list[str]) -> dict[str, dict]:
+    """Start/stop times of the units the timers activate.
+
+    OnUnitActiveSec / OnUnitInactiveSec count from the service, not from the timer's last trigger.
+    A manual `systemctl start` of the service therefore moves the next fire later; measuring from
+    the timer's LastTrigger would call that late, or even silent (2026-10-11: publish-watch.timer
+    showed late after a manual run).
+    """
+    if not units:
+        return {}
+    out = _systemctl(scope, "show", "--no-pager", "-p",
+                     "Id,ActiveEnterTimestamp,InactiveExitTimestamp,InactiveEnterTimestamp",
+                     "--timestamp=unix", *units)
+    res: dict[str, dict] = {}
+    cur: dict = {}
+    for line in out.splitlines() + [""]:
+        if not line.strip():
+            if cur.get("Id"):
+                res[cur["Id"]] = cur
+            cur = {}
+            continue
+        k, _, v = line.partition("=")
+        cur[k] = float(v.lstrip("@")) if k != "Id" and v.startswith("@") else v
+    return res
+
+
 def calendar_period(spec: str) -> float | None:
     """OnCalendar の発火時刻を N 回先まで出し、隣り合う間の最大値を周期とする（曜日指定など不等間隔にも効く）。"""
     out = subprocess.run(["systemd-analyze", "calendar", f"--iterations={CAL_ITER}", spec],
@@ -135,10 +161,22 @@ def evaluate(scope: str, now: float) -> list[dict]:
     timers = [t for t in list_timers(scope)
               if not any(fnmatch.fnmatch(t.get("unit", ""), pat.strip()) for pat in IGNORE)]
     props = show_props(scope, [t["unit"] for t in timers])
+    svc = service_times(scope, sorted({t["activates"] for t in timers if t.get("activates")}))
     for t in timers:
         unit = t["unit"]
         p = props.get(unit, {})
         last = (t.get("last") or 0) / 1e6 or None          # usec → 秒。一度も無ければ None
+        # 単調タイマーの起点はサービス側（手で動かすと次の発火が後ろへずれる）＝その時刻も「最後」に数える
+        mono = " ".join(p.get("TimersMonotonic", []))
+        s = svc.get(t.get("activates", ""), {})
+        base = []
+        if "OnUnitActiveUSec" in mono:
+            base += [s.get("ActiveEnterTimestamp"), s.get("InactiveExitTimestamp")]
+        if "OnUnitInactiveUSec" in mono:
+            base += [s.get("InactiveEnterTimestamp")]
+        base = [b for b in base if isinstance(b, float) and b > 0]
+        if base and max(base) > (last or 0):
+            last = max(base)
         row = {"scope": scope, "unit": unit, "last": last, "period": None,
                "deadline": None, "silent": False, "why": "健全"}
         enabled = p.get("UnitFileState") in ("enabled", "enabled-runtime", "static", "linked")
