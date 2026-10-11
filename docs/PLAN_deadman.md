@@ -93,6 +93,45 @@ silent 故障は "悪い値の存在" ではなく "信号の不在" として�
 - **盤は受動＝見に行かなければ意味が薄い**。だから赤への遷移は必ず **Telegram を一発**叩く（§3）。
   盤は「今どうなっているか」、push は「今まさに変わった」を担う。
 
+### 5.1 実装の仕様（2026-10-11・下調べを経て確定・本人了承）
+
+**置き場**：bifrost の Grafana（homelab の `grafana-dashboards/` から読み込み）。新しい常駐は増やさない。
+**警報は足さない**：盤は見るだけ。赤への遷移の push は durandal 側の各見張りが Telegram へ直接送っている（二重通知を避ける・BroadcastSilent を外した 9/15 と同じ理由）。
+
+**材料（durandal の node_exporter textfile → bifrost の Prometheus・確認済み）**
+| 対象 | 数字 |
+|---|---|
+| 放送 | `closecraw_liveness_{healthy,streaming,mkv_fresh,control_reachable,last_ok_seconds,prober_run_seconds}` |
+| タイマー | `closecraw_timer_silent`（赤）・`closecraw_timer_late`（黄）・`_last_trigger_seconds`・`_period_seconds`・`_deadline_seconds`・`_prober_run_seconds` |
+| 予約公開 | `closecraw_publish_missed{kind="sns"|"youtube"}`・`closecraw_publish_unchecked`・`closecraw_publish_watch_run_seconds` |
+
+**下調べで分かった落とし穴（PromQL で黄色を作らない理由）**
+- `time() - last_trigger` は、プローバが 5 分ごとにしか書かないので最大 5 分古い＝1 分周期のタイマーが元気でも遅れて見える。経過を出すなら `prober_run_seconds - last_trigger_seconds` を使う。
+- `経過/締切 > 0.8` は、締切が周期の約 1.1 倍なので週 1 のタイマーが発火直前に常に黄になる（実測で平時 6 本）。
+- `経過 > 周期` も、RandomizedDelay 付き（例：毎時 :03＋最大 20 分ずらす投稿タイマー）を誤って黄にする。
+- ∴ **黄はプローバが決める**（`closecraw_timer_late`＝周期＋揺らぎを過ぎたが締切前）。盤はその値を色にするだけ。
+
+**A. 既存の「異常だけ」（`abnormal.json`・uid `abnormal-only`）への追加**
+- 合計の数字に `+ (count(closecraw_timer_silent == 1) or vector(0)) + (sum(closecraw_publish_missed) or vector(0))` を足す。
+- 表 ⑤「黙って止まった定時ジョブ」：`closecraw_timer_silent == 1`（列＝instance・scope・unit）。
+- 表 ⑥「出ていない予約公開」：`closecraw_publish_missed > 0`（列＝kind・件数。中身の名前は durandal の Telegram と `publish-watch` の出力にある）。
+
+**B. 新しい盤「deadman」（uid `deadman`）**
+| 段 | パネル | 式 | 色 |
+|---|---|---|---|
+| 放送 | 放送の生死 | `closecraw_liveness_healthy` | 1 緑 / 0 赤 |
+| 放送 | 配信中・録画の鮮度・操作口 | `closecraw_liveness_streaming`・`_mkv_fresh`・`_control_reachable` | 値の表示（色は付けない＝配信外は 0 が普通） |
+| 放送 | 見張りの鮮度 | `time() - closecraw_liveness_prober_run_seconds` | <180 秒 緑 / <600 黄 / それ以上 赤 |
+| タイマー | 赤の数 | `count(closecraw_timer_silent == 1) or vector(0)` | 0 緑 / ≥1 赤 |
+| タイマー | 黄の数 | `count(closecraw_timer_late == 1) or vector(0)` | 0 緑 / ≥1 黄 |
+| タイマー | 一覧（状態の悪い順） | 状態＝`closecraw_timer_silent * 2 + on(instance,job,scope,unit) closecraw_timer_late`（0 緑・1 黄・2 赤の値マップ）、経過＝`closecraw_timer_prober_run_seconds - on(instance,job) group_right closecraw_timer_last_trigger_seconds`、周期＝`closecraw_timer_period_seconds` | 状態の列に色 |
+| タイマー | 見張りの鮮度 | `time() - closecraw_timer_prober_run_seconds` | <600 緑 / <900 黄 / それ以上 赤（警報 TimerProberStale と同じ線） |
+| 予約公開 | 出ていない件数 | `sum(closecraw_publish_missed)` | 0 緑 / ≥1 赤 |
+| 予約公開 | 聞けなかった件数 | `closecraw_publish_unchecked` | 0 緑 / ≥1 黄（クォータの門・次の便で聞き直す） |
+| 予約公開 | 見張りの鮮度 | `time() - closecraw_publish_watch_run_seconds` | <1200 緑 / <2700 黄 / それ以上 赤（15 分周期） |
+
+**持ち場**：durandal 側（数字を出す）は済＝`timer_prober` 5650652（late・period）・`~/scripts` の publish-watch。A と B は bifrost の homelab の持ち場＝向こうのセッションが本人の GO の後に入れる。
+
 ---
 
 ## 6. 「AI に判断させない」の維持（DESIGN.md 整合）
