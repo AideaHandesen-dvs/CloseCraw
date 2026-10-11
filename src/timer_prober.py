@@ -161,6 +161,10 @@ def evaluate(scope: str, now: float) -> list[dict]:
                  parse_duration(p.get("AccuracyUSec", "")))
         deadline = period + slack + max(GRACE_MIN_S, period * GRACE_RATIO)
         row.update(period=period, deadline=deadline)
+        # late = past the latest legitimate fire time (period + randomized/accuracy slack) but not yet silent.
+        # Dashboard-only (yellow); no alert is sent for it.
+        if last is not None and period + slack < now - last <= deadline:
+            row["late"] = True
         if last is None:
             since = float((p.get("ActiveEnterTimestamp") or "@0").lstrip("@") or 0)
             if since and now - since > deadline:
@@ -192,6 +196,12 @@ def _prom(rows: list[dict], now: float) -> str:
                 [(r, f'{r["last"] or 0:.0f}') for r in watched])
             + g("closecraw_timer_deadline_seconds", "Seconds after the last fire before it counts as silent.",
                 [(r, f'{r["deadline"]:.0f}') for r in watched if r["deadline"]])
+            # Yellow on the dashboard. Decided here, not in PromQL: only the prober knows each timer's
+            # randomized/accuracy slack, and a ratio on elapsed/deadline shows weekly timers yellow all the time.
+            + g("closecraw_timer_late", "1 if past period+slack since the last fire but not yet silent.",
+                [(r, 1 if r.get("late") and not r["silent"] else 0) for r in watched])
+            + g("closecraw_timer_period_seconds", "Expected seconds between fires (calendar max gap or monotonic interval).",
+                [(r, f'{r["period"]:.0f}') for r in watched if r["period"]])
             + "# HELP closecraw_timer_prober_run_seconds Unix time of the last prober run.\n"
               "# TYPE closecraw_timer_prober_run_seconds gauge\n"
               f"closecraw_timer_prober_run_seconds {now:.0f}\n")
