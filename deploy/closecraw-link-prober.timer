@@ -1,0 +1,10 @@
+[Unit]
+Description=Run CloseCraw stuck-down link prober every 2min
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=2min
+AccuracySec=20s
+
+[Install]
+WantedBy=timers.target

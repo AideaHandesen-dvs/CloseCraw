@@ -1,0 +1,11 @@
+[
+  {
+    "name": "phonebox-hfp",
+    "unit": "phonebox-bt.service",
+    "scope": "user",
+    "up": "EVENT BT_UP",
+    "down": "EVENT BT_DOWN",
+    "max_down_s": 600,
+    "note": "電話の箱の HFP（通話の線）。10分＝再起動直後の短い切れ目（2026-10-13 04:19 に15秒・62秒）を鳴らさない余裕。"
+  }
+]

@@ -1,0 +1,16 @@
+# CloseCraw deadman — つながりの沈黙検知（LinkStuckDown）。systemd --user 用。
+# 設置: install -Dm644 deploy/closecraw-link-prober.{service,timer} -t ~/.config/systemd/user/
+#       systemctl --user daemon-reload && systemctl --user enable --now closecraw-link-prober.timer
+# 取消: systemctl --user disable --now closecraw-link-prober.timer
+# 対象の一覧は deploy/link_targets.json（journald の「つながった/切れた」の記録を読むだけ）。
+[Unit]
+Description=CloseCraw deadman: stuck-down link prober (LinkStuckDown)
+Documentation=file:///home/john/closecraw-port/docs/PLAN_deadman.md
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/john/closecraw-port
+# Telegram の creds（TELEGRAM_BOT_TOKEN / chat）。--alert は切れたままに入った/抜けた時だけ送る。
+EnvironmentFile=-/home/john/scripts/secrets.env
+Environment=LINK_TEXTFILE=/var/lib/node_exporter/textfile_collector/closecraw_link.prom
+ExecStart=/usr/bin/python3 /home/john/closecraw-port/src/link_prober.py --alert
