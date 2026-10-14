@@ -15,7 +15,8 @@ import time
 import threading
 from collections import deque
 from pathlib import Path
-from notifier import send_telegram
+from notifier import notify, missing_settings, configured_channels
+from urllib.parse import urlparse
 
 import requests
 from flask import Flask, request, jsonify
@@ -35,8 +36,6 @@ SPEC_FILE = os.getenv("CLOSECRAW_SPEC_FILE", "/opt/closecraw/inventory.json")
 SCRIPTS_DIR = Path(os.getenv("CLOSECRAW_SCRIPTS_DIR", "/opt/closecraw/scripts"))
 TIMEOUT_LLM = 60
 TIMEOUT_SCRIPT = 120
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 PROCESS_INTERVAL = 300  # 5分ごとにキュー処理
 # 自分自身を指すホスト名。診断スクリプトには "localhost" を渡して ssh を省かせる
 # （自ホストに ssh 鍵が無い環境なので、ホスト名のままだと必ず Permission denied になる）。
@@ -58,8 +57,10 @@ GEMINI_URL = (
     f"{LLM_MODEL}:generateContent"
 )
 
-if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-    raise RuntimeError("TELEGRAM_TOKEN or TELEGRAM_CHAT_ID not set in .env file")
+# 送り先は notifier の CLOSECRAW_NOTIFY で選ぶ（既定 telegram）。足りない設定があれば起動時に止める。
+_missing = missing_settings()
+if _missing:
+    raise RuntimeError(f"通知の設定が足りない（.env）: {', '.join(_missing)}")
 
 # ホワイトリスト
 WHITELIST = [
@@ -70,10 +71,14 @@ WHITELIST = [
     "linux_disk_inode.sh",
     "linux_cpu_top.sh",
     "linux_journal_anomaly.sh",
+    "site_http_check.sh",
 ]
 
 # alertname → PromQL マッピング
 ALERT_TO_QUERY = {
+    # 外から見るサイト（blackbox_exporter）。SiteCert を Site より先に置く（先に当たった方を使う）
+    "SiteCert": "probe_ssl_earliest_cert_expiry",
+    "Site": "probe_success",
     "Load": "node_load1",
     "Memory": "node_memory_MemAvailable_bytes",
     "Disk": "node_filesystem_avail_bytes",
@@ -97,10 +102,15 @@ DEFAULT_SCRIPT = {
     "linux": "linux_journal_anomaly.sh",
     "windows": "win_eventlog_anomaly.sh",
 }
+# 外から見るサイト（ルールで os: external を付ける）。相手のサーバには入らず、
+# 監視サーバの側から HTTP と証明書を読み直すだけ。共用レンタルサーバでも使える。
+EXTERNAL_SCRIPT = "site_http_check.sh"
 
 
 def select_script(alertname, os_type):
     """alertname と OS 種別から診断スクリプトを表引きで決定する"""
+    if os_type == "external":
+        return EXTERNAL_SCRIPT
     name = alertname.lower()
     for key, by_os in ALERT_TO_SCRIPT.items():
         if key in name:
@@ -139,13 +149,19 @@ def parse_alert(alert):
     instance = alert["labels"]["instance"]
     severity = alert["labels"].get("severity", "unknown")
     summary = alert["annotations"].get("summary", "")
-    hostname = instance.split(":")[0]
+    # blackbox_exporter のアラートは instance が URL（https://example.jp/ など）。
+    # "host:port" のつもりで ":" で切ると "https" になってしまう。
+    if "://" in instance:
+        hostname = urlparse(instance).hostname or instance
+    else:
+        hostname = instance.split(":")[0]
     return {
         "alertname": alertname,
         "hostname": hostname,
         "instance": instance,
         "severity": severity,
         "summary": summary,
+        "os_label": alert["labels"].get("os", ""),
     }
 
 
@@ -374,7 +390,8 @@ def run_script(script_name, hostname):
 def process_single_alert(info, spec):
     """単一アラートを処理し、通知メッセージを返す。LLM失敗時はフォールバック"""
     hostname = info["hostname"]
-    os_type = detect_os(hostname, spec)
+    # 外から見るサイトはインベントリに居ない＝ルールのラベル os: external で見分ける
+    os_type = "external" if info.get("os_label") == "external" else detect_os(hostname, spec)
 
     print(f"\n処理中: {info['alertname']} on {hostname}")
 
@@ -386,7 +403,9 @@ def process_single_alert(info, spec):
     print(f"選択スクリプト: {selected}")
 
     # スクリプト実行
-    script_output = run_script(selected, hostname)
+    # 外のサイトは URL ごと渡す（ssh しない・監視サーバ側で curl/openssl を流すだけ）
+    target = info["instance"] if os_type == "external" else hostname
+    script_output = run_script(selected, target)
     print(f"スクリプト出力先頭500文字: {script_output[:500]}")
 
     # スクリプトがそもそも走っていない出力（実行エラー/タイムアウト/スクリプト不在）を
@@ -439,11 +458,11 @@ def process_queue():
     print(f"DEBUG: 送信メッセージ長: {len(combined)} 文字")
     print(f"DEBUG: メッセージ先頭300文字: {combined[:300]}")
 
-    success = send_telegram(TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, combined)
+    success = notify(combined)
     if success:
-        print("Telegram 送信成功（まとめ通知）")
+        print("通知 送信成功（まとめ通知）")
     else:
-        print("Telegram 送信失敗", file=sys.stderr)
+        print("通知 全ての送り先で送信失敗", file=sys.stderr)
     print(f"=== キュー処理完了 ===\n")
 
 
@@ -487,5 +506,6 @@ if __name__ == "__main__":
     scheduler_thread = threading.Thread(target=scheduler_loop, daemon=True)
     scheduler_thread.start()
 
-    print(f"alert_handler 起動中 (port 5001, キューイングモード, LLM={LLM_PROVIDER}/{LLM_MODEL})...")
+    print(f"alert_handler 起動中 (port 5001, キューイングモード, LLM={LLM_PROVIDER}/{LLM_MODEL}, "
+          f"通知={','.join(configured_channels())})...")
     app.run(host="0.0.0.0", port=5001, debug=False)

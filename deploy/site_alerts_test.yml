@@ -1,0 +1,37 @@
+# site_alerts.yml の単体試験: promtool test rules deploy/site_alerts_test.yml
+# 瞬断（1分おきに落ちて戻る）では SiteDown を鳴らさないことも確かめている（blip.example）。
+rule_files: [site_alerts.yml]
+evaluation_interval: 1m
+tests:
+  - interval: 1m
+    input_series:
+      - series: 'probe_success{job="sites",instance="https://down.example/"}'
+        values: '1 0 0 0 0 0'
+      - series: 'probe_success{job="sites",instance="https://blip.example/"}'
+        values: '1 0 1 0 1 0'
+      - series: 'probe_success{job="sites",instance="https://slow.example/"}'
+        values: '1x15'
+      - series: 'probe_duration_seconds{job="sites",instance="https://slow.example/"}'
+        values: '7x15'
+      - series: 'probe_ssl_earliest_cert_expiry{job="sites",instance="https://cert.example/"}'
+        values: '864000x70'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: SiteDown
+        exp_alerts:
+          - exp_labels: {severity: critical, os: external, job: sites, instance: "https://down.example/"}
+            exp_annotations:
+              summary: "サイトが応えない: https://down.example/"
+              description: "3分以上、2xx の応答が返っていない。HTTP コードや証明書は通知の診断（site_http_check.sh）に出る。"
+      - eval_time: 12m
+        alertname: SiteSlow
+        exp_alerts:
+          - exp_labels: {severity: warning, os: external, job: sites, instance: "https://slow.example/"}
+            exp_annotations:
+              summary: "サイトが遅い: https://slow.example/（7.0 秒）"
+      - eval_time: 65m
+        alertname: SiteCertExpiring
+        exp_alerts:
+          - exp_labels: {severity: warning, os: external, job: sites, instance: "https://cert.example/"}
+            exp_annotations:
+              summary: "証明書の期限が近い: https://cert.example/（残り 10 日）"

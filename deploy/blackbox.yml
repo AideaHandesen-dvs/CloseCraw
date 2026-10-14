@@ -1,0 +1,15 @@
+# CloseCraw — 外から見るサイト用の blackbox_exporter 設定
+# 設置先: blackbox_exporter の --config.file（例 /etc/blackbox_exporter/blackbox.yml）
+# 相手のサーバに何も置かずに、応答と証明書の期限を見る。共用レンタルサーバ（Xserver など）でも使える。
+# 2026-10-14 blackbox_exporter v0.29.0 で読み込みと実際の探りを確認。
+modules:
+  # サイトが 2xx/3xx を返すか。リダイレクトは追う（http→https や / → /shop/ が普通にある）。
+  http_2xx:
+    prober: http
+    timeout: 15s
+    http:
+      preferred_ip_protocol: ip4
+      follow_redirects: true
+      valid_status_codes: []        # 空＝2xx を成功とみなす（リダイレクトを追った後の最終応答で判定）
+      headers:
+        User-Agent: "CloseCraw-site-check/1.0"

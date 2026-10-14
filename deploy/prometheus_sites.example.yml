@@ -1,0 +1,21 @@
+# CloseCraw — 外から見るサイトの scrape 設定（prometheus.yml の scrape_configs に足す断片）
+# 見たいサイトを targets に並べるだけ。blackbox_exporter が監視サーバの :9115 で動いている前提。
+# job 名 "sites" は deploy/site_alerts.yml のルールが参照している＝変えるなら両方直す。
+scrape_configs:
+  - job_name: 'sites'
+    metrics_path: /probe
+    params:
+      module: [http_2xx]
+    scrape_interval: 60s
+    static_configs:
+      - targets:
+          - https://example.jp/
+          - https://shop.example.jp/
+    relabel_configs:
+      # targets の URL を ?target= に渡し、instance ラベルには URL を残す
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: 127.0.0.1:9115

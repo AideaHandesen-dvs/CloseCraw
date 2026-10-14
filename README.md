@@ -95,8 +95,14 @@ touch .env
 
 | 変数 | 説明 |
 |------|------|
-| `TELEGRAM_TOKEN` | Telegram Bot トークン（必須） |
-| `TELEGRAM_CHAT_ID` | 通知先チャット ID（必須） |
+| `CLOSECRAW_NOTIFY` | 送り先（カンマ区切り）：`telegram` / `slack` / `email`（デフォルト `telegram`）。知らない名前や足りない設定があると起動時に止まる |
+| `TELEGRAM_TOKEN` | Telegram Bot トークン（`telegram` を選んだ時に必須） |
+| `TELEGRAM_CHAT_ID` | 通知先チャット ID（`telegram` を選んだ時に必須） |
+| `SLACK_WEBHOOK_URL` | Slack の Incoming Webhook URL（`slack` を選んだ時に必須） |
+| `SMTP_HOST` / `SMTP_PORT` | メールの送信サーバ（`email` を選んだ時に必須・ポートのデフォルト `587`） |
+| `SMTP_USER` / `SMTP_PASSWORD` | SMTP 認証（要る時だけ） |
+| `SMTP_FROM` / `SMTP_TO` | 差出人 / 宛先（宛先はカンマ区切りで複数可） |
+| `SMTP_SECURITY` | `starttls`（デフォルト）/ `ssl` / `none` |
 | `LLM_PROVIDER` | `ollama` または `gemini`（デフォルト `ollama`） |
 | `LLM_MODEL` | 使用モデル名（デフォルト `gemini-2.5-flash-lite`。無印 flash は無料枠が小さいことがある） |
 | `GEMINI_API_KEY` | Gemini 利用時のみ必須 |
@@ -155,8 +161,21 @@ journalctl --user -u alert-handler.service -n 50
 | `win_process_delta.sh` | Windows | 数秒間のワーキングセット増加 TOP10 |
 | `win_eventlog_anomaly.sh` | Windows | イベントログのエラー種類別集計 |
 | `win_disk_anomaly.sh` | Windows | 直近 24h で更新された大きいファイル |
+| `site_http_check.sh` | 外のサイト | 名前解決 / 応答3回の所要時間の内訳 / 応答ヘッダ / 証明書と残り日数 |
 
 各スクリプトは `script <hostname>` 形式で呼ぶと、内部で `ssh <hostname>` して対象機上で自身を実行する（`localhost` ならローカル実行）。
+`site_http_check.sh` だけは例外で、`script <URL>` で呼び、ssh せずに監視サーバの側で読み直す。
+
+### 外から見るサイト（相手のサーバに何も置かない）
+
+共用レンタルサーバのように、見張りのプログラムを置けない相手向け。blackbox_exporter で応答と証明書を外から見る。
+
+- `deploy/blackbox.yml` … blackbox_exporter の設定（`http_2xx`）
+- `deploy/prometheus_sites.example.yml` … scrape 設定の断片（見たい URL を `targets` に並べる・job 名は `sites`）
+- `deploy/site_alerts.yml` … `SiteDown`（3分続けて応えない）/ `SiteSlow`（5秒超が10分）/ `SiteCertExpiring`（残り14日未満）
+- `deploy/site_alerts_test.yml` … ルールの単体試験（`promtool test rules deploy/site_alerts_test.yml`）
+
+ルールに `os: external` を付けてあるので、`alert_handler` はインベントリを引かずに `site_http_check.sh <URL>` を流して要約する。
 
 ---
 

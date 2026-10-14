@@ -1,0 +1,39 @@
+# CloseCraw — 外から見るサイトのアラート（Prometheus のルール）
+# 設置先: /etc/prometheus/rules/site_alerts.yml
+#   + prometheus.yml の rule_files に1行追加 + 下の scrape 設定（deploy/prometheus_sites.example.yml）→ reload。
+# ラベル os: external が付いたアラートは、alert_handler が ssh せずに
+# 監視サーバ側で site_http_check.sh <URL> を流して要約する（ALERT_TO_SCRIPT は通らない）。
+# しきい値は「誤報で起こさない」向き。小さな EC が対象＝数分の瞬断より、続く停止を知らせたい。
+groups:
+  - name: site_alerts
+    rules:
+      # サイトが応えない（2xx が返らない）状態が3分続いた
+      - alert: SiteDown
+        expr: probe_success{job="sites"} == 0
+        for: 3m
+        labels:
+          severity: critical
+          os: external
+        annotations:
+          summary: "サイトが応えない: {{ $labels.instance }}"
+          description: "3分以上、2xx の応答が返っていない。HTTP コードや証明書は通知の診断（site_http_check.sh）に出る。"
+
+      # 応えてはいるが遅い（最後まで返るのに5秒超）が10分続いた
+      - alert: SiteSlow
+        expr: probe_duration_seconds{job="sites"} > 5 and probe_success{job="sites"} == 1
+        for: 10m
+        labels:
+          severity: warning
+          os: external
+        annotations:
+          summary: "サイトが遅い: {{ $labels.instance }}（{{ $value | printf \"%.1f\" }} 秒）"
+
+      # 証明書の期限が14日を切った（自動更新が止まっている疑い）
+      - alert: SiteCertExpiring
+        expr: (probe_ssl_earliest_cert_expiry{job="sites"} - time()) / 86400 < 14
+        for: 1h
+        labels:
+          severity: warning
+          os: external
+        annotations:
+          summary: "証明書の期限が近い: {{ $labels.instance }}（残り {{ $value | printf \"%.0f\" }} 日）"
