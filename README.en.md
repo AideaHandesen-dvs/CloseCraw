@@ -199,3 +199,7 @@ journalctl --user -u alert-handler.service -n 20
 - LLM summarization is allowed to fail (returns None) and falls back to attaching the raw output (**the notification always goes out**). LLM calls have a hard timeout so a hang can't stall the scheduler.
 - Only scripts in the `WHITELIST` can run.
 - With Gemini, a 429 response's body is read to tell a daily-quota (RPD) breach from a per-minute (RPM) one; RPD breaches are not retried (hammering something that won't recover until tomorrow only burns more quota). The API key is passed in a header (as a query parameter it can leak into logs via exception messages).
+
+## License
+
+MIT License (see [LICENSE](LICENSE)).
