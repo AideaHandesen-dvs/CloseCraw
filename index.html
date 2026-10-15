@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CloseCraw｜サーバ監視の設置</title>
+<meta name="description" content="サーバが止まったら、調べて、要点を日本語で知らせる。運用担当がいない小さな会社のための、サーバ監視の設置サービスです。">
+<link rel="icon" href="favicon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+JP:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --paper: #f4f4f5;
+  --ink: #1b1d2e;
+  --ink-soft: #4a4d63;
+  --eye: #e5404e;
+  --trace: #8e5bd6;
+  --line: #d6d6de;
+  --card: #ffffff;
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: "IBM Plex Sans JP", system-ui, sans-serif;
+  font-size: 17px;
+  line-height: 1.85;
+  font-feature-settings: "palt";
+}
+a { color: var(--ink); text-underline-offset: 3px; }
+a:focus-visible, .btn:focus-visible { outline: 3px solid var(--trace); outline-offset: 3px; }
+.wrap { max-width: 1040px; margin: 0 auto; padding: 0 24px; }
+
+/* header */
+.top { display: flex; align-items: center; justify-content: space-between; padding: 20px 0; }
+.brand { display: flex; align-items: center; gap: 10px; font-weight: 700; letter-spacing: .02em; text-decoration: none; }
+.brand img { width: 30px; height: 30px; mix-blend-mode: multiply; }
+.top nav a { font-size: 15px; color: var(--ink-soft); }
+
+/* hero */
+.hero { display: grid; grid-template-columns: 1.1fr .9fr; gap: 48px; align-items: center; padding: 40px 0 72px; }
+.hero h1 { font-size: clamp(30px, 4.6vw, 48px); line-height: 1.35; margin: 0 0 20px; font-weight: 700; letter-spacing: -.01em; }
+.hero p.lead { color: var(--ink-soft); margin: 0 0 32px; max-width: 30em; }
+.actions { display: flex; flex-wrap: wrap; gap: 12px; }
+.btn { display: inline-block; padding: 12px 22px; border-radius: 6px; font-weight: 700; font-size: 16px; text-decoration: none; border: 2px solid var(--ink); }
+.btn.primary { background: var(--ink); color: #fff; }
+.btn.ghost { background: transparent; color: var(--ink); }
+
+/* the crow brings a message */
+.scene { position: relative; display: flex; flex-direction: column; align-items: center; }
+.scene .crow { width: 130px; margin-bottom: 4px; }
+.trace { width: 2px; height: 34px; background: var(--trace); position: relative; }
+.trace::before, .trace::after { content: ""; position: absolute; left: -3px; width: 8px; height: 8px; border-radius: 50%; background: var(--trace); }
+.trace::before { top: -4px; } .trace::after { bottom: -4px; }
+.note {
+  width: 100%; max-width: 380px; background: var(--card); border-radius: 18px;
+  padding: 16px 18px 18px; box-shadow: 0 1px 0 var(--line), 0 18px 40px -24px rgba(27,29,46,.45);
+  font-family: system-ui, -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif; font-size: 14px; line-height: 1.6;
+}
+.note .app { display: flex; justify-content: space-between; color: var(--ink-soft); font-size: 12.5px; margin-bottom: 6px; }
+.note .title { font-weight: 700; font-size: 15px; margin-bottom: 4px; }
+.note .title .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: var(--eye); margin-right: 7px; vertical-align: 1px; }
+.note ul { margin: 6px 0 8px; padding-left: 1.1em; }
+.note .guess { border-top: 1px solid var(--line); padding-top: 8px; margin-top: 4px; }
+.note-cap { font-size: 13px; color: var(--ink-soft); margin-top: 10px; }
+@media (prefers-reduced-motion: no-preference) {
+  .note { animation: arrive .7s .35s cubic-bezier(.2,.8,.2,1) both; }
+  .trace { animation: grow .35s both; transform-origin: top; }
+  @keyframes arrive { from { opacity: 0; transform: translateY(-14px); } to { opacity: 1; transform: none; } }
+  @keyframes grow { from { transform: scaleY(0); } to { transform: none; } }
+}
+
+/* sections */
+section.block { padding: 56px 0; border-top: 1px solid var(--line); }
+section.block h2 { font-size: 24px; line-height: 1.5; margin: 0 0 24px; }
+.measure { max-width: 40em; }
+.pains { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 12px 40px; }
+.pains li { padding-left: 1.4em; position: relative; }
+.pains li::before { content: ""; position: absolute; left: 0; top: .78em; width: 8px; height: 8px; border-radius: 50%; border: 2px solid var(--eye); }
+
+.steps { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(3, 1fr); gap: 0; counter-reset: s; }
+.steps > li { counter-increment: s; position: relative; padding: 38px 24px 0 0; }
+.steps > li::before {
+  content: counter(s); position: absolute; top: 0; left: 0; width: 26px; height: 26px; border-radius: 50%;
+  background: var(--paper); border: 2px solid var(--trace); color: var(--trace); font-weight: 700; font-size: 14px;
+  display: grid; place-items: center; line-height: 1; z-index: 1;
+}
+.steps > li:not(:last-child)::after { content: ""; position: absolute; top: 12px; left: 26px; right: 0; height: 2px; background: var(--trace); }
+.steps h3 { font-size: 19px; margin: 0 0 6px; }
+.steps p { margin: 0; color: var(--ink-soft); }
+.steps .detail { font-size: 15px; margin-top: 8px; padding-left: 1em; }
+
+.reasons { display: grid; grid-template-columns: 1fr 1fr; gap: 28px 48px; }
+.reasons h3 { font-size: 17px; margin: 0 0 4px; }
+.reasons p { margin: 0; color: var(--ink-soft); }
+
+.plain { margin: 0; padding-left: 1.2em; }
+.maker { display: grid; grid-template-columns: auto 1fr; gap: 24px; align-items: start; }
+.maker .name { font-weight: 700; font-size: 19px; }
+.placeholder { background: #fff3c4; padding: 2px 6px; border-radius: 4px; }
+
+footer { padding: 32px 0 48px; color: var(--ink-soft); font-size: 14px; border-top: 1px solid var(--line); }
+
+@media (max-width: 760px) {
+  body { font-size: 16px; }
+  .wrap { padding: 0 16px; }
+  .hero { grid-template-columns: 1fr; gap: 36px; padding: 16px 0 48px; }
+  .pains, .reasons { grid-template-columns: 1fr; }
+  .steps { grid-template-columns: 1fr; gap: 28px; }
+  .steps > li { padding: 0 0 0 42px; }
+  .steps > li:not(:last-child)::after { top: 26px; left: 12px; right: auto; width: 2px; height: calc(100% + 2px); }
+  .maker { grid-template-columns: 1fr; }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <a class="brand" href="./"><img src="favicon.png" alt="">CloseCraw</a>
+    <nav><a href="https://github.com/AideaHandesen-dvs/CloseCraw">GitHub</a></nav>
+  </header>
+
+  <main>
+    <div class="hero">
+      <div>
+        <h1>サーバが止まったら、<br>調べて、要点を<br>日本語で知らせる。</h1>
+        <p class="lead">運用担当がいない小さな会社のための、サーバ監視の設置サービスです。異常に気づいたら、決まった調査を自動で流し、何が起きていそうかを添えてお知らせします。</p>
+        <div class="actions">
+          <a class="btn primary" href="#contact">相談する</a>
+          <a class="btn ghost" href="https://github.com/AideaHandesen-dvs/CloseCraw">中身を GitHub で見る</a>
+        </div>
+      </div>
+      <div class="scene" aria-label="通知の例">
+        <img class="crow" src="crow.png" alt="CloseCraw のカラス">
+        <div class="trace" aria-hidden="true"></div>
+        <div class="note">
+          <div class="app"><span>CloseCraw</span><span>いま</span></div>
+          <div class="title"><span class="dot" aria-hidden="true"></span>shop.example.jp が応答していません</div>
+          <div>3分以上、応答がありません。外から調べた結果：</div>
+          <ul>
+            <li>名前解決は正常（203.0.113.10）</li>
+            <li>接続はできるが、3回とも20秒で時間切れ</li>
+            <li>証明書は有効（残り58日）</li>
+          </ul>
+          <div class="guess">見立て：回線や DNS ではなく、サーバ側で Web サーバが応答を返せていない可能性があります。まず Web サーバのプロセスとエラーログを確認してください。</div>
+        </div>
+        <p class="note-cap">通知の例（架空のサイトです）</p>
+      </div>
+    </div>
+
+    <section class="block">
+      <h2>こんなことはありませんか</h2>
+      <ul class="pains">
+        <li>サイトが落ちていたのに、お客様からの連絡で初めて気づいた</li>
+        <li>監視は入れたけれど、通知が来ても何が起きているのか読めない</li>
+        <li>SSL 証明書の期限が切れて、サイトに警告が出てしまった</li>
+        <li>サーバを見られる人が社内にいない</li>
+      </ul>
+    </section>
+
+    <section class="block">
+      <h2>CloseCraw がすること</h2>
+      <ol class="steps">
+        <li>
+          <h3>見張る</h3>
+          <p>サーバの状態と、サイトの外からの見え方を、常に見張ります。</p>
+          <ul class="plain detail">
+            <li>サイトが3分応答しない</li>
+            <li>表示に5秒以上かかる状態が10分続く</li>
+            <li>SSL 証明書の残りが14日を切った</li>
+          </ul>
+        </li>
+        <li>
+          <h3>調べる</h3>
+          <p>異常を見つけると、決まった調査を自動で流します。ディスクの空き、プロセス、ログ、応答にかかった時間の内訳などです。</p>
+        </li>
+        <li>
+          <h3>知らせる</h3>
+          <p>調べた結果を、AI が要点だけ日本語にまとめて、Slack・メール・Telegram に届けます。</p>
+        </li>
+      </ol>
+    </section>
+
+    <section class="block">
+      <h2>安心して任せられる理由</h2>
+      <div class="reasons">
+        <div>
+          <h3>AI にコマンドを打たせません</h3>
+          <p>どの調査を流すかは、あらかじめ決めた表で選びます。AI がするのは、結果を要約することだけです。</p>
+        </div>
+        <div>
+          <h3>調査は読むだけです</h3>
+          <p>許可した調査スクリプトしか動かず、サーバの設定は変えません。</p>
+        </div>
+        <div>
+          <h3>AI が止まっても通知は止まりません</h3>
+          <p>要約に失敗したときは、調査結果をそのまま添えて送ります。</p>
+        </div>
+        <div>
+          <h3>中身を公開しています</h3>
+          <p>ソースコードは GitHub で誰でも読めます（MIT ライセンス）。</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="block">
+      <h2>お願いできること</h2>
+      <ul class="plain measure">
+        <li>監視の設置（サーバへの導入と、外からの監視の設定）</li>
+        <li>通知先の設定（Slack・メール・Telegram）</li>
+        <li>設置後の見守りと調整</li>
+      </ul>
+    </section>
+
+    <section class="block">
+      <h2>つくった人</h2>
+      <div class="maker measure">
+        <div class="name">Handesen</div>
+        <p style="margin:0">自宅で Linux 機16台とネットワーク機器を24時間運用し、その現場のために CloseCraw を作りました。今もこの仕組みで、自分のサーバを毎日見張っています。</p>
+      </div>
+    </section>
+
+    <section class="block" id="contact">
+      <h2>ご相談</h2>
+      <p class="measure"><span class="placeholder">〔問い合わせ先：未定〕</span></p>
+    </section>
+  </main>
+
+  <footer>
+    CloseCraw　<a href="https://github.com/AideaHandesen-dvs/CloseCraw">github.com/AideaHandesen-dvs/CloseCraw</a>
+  </footer>
+</div>
+</body>
+</html>
